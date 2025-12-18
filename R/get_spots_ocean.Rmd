@@ -1,0 +1,266 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(readr)
+library(dplyr)
+library(jsonlite)
+library(stringr)
+library(countrycode)
+```
+
+
+# surf spots database
+
+```{r}
+# csv from https://github.com/feljost/surf-finder/blob/main/Map_of_the_Worlds_Best_Surf_Spots.csv
+# json from https://gist.github.com/naotokui/01c384bf58ca43261eafe6a5e2ad6e85
+
+spots_top <- read_csv("data/Map_of_the_Worlds_Best_Surf_Spots.csv")
+spots_world <- fromJSON("data/surfspots.json")
+
+spotsdb <- bind_rows(
+  spots_top %>% 
+    select(lat = Y, lon = X, spot_name = Name) %>% 
+    mutate(region = NA_character_),
+  spots_world %>% 
+    select(lat, lon = lng, spot_name = name, region = country) %>% 
+    filter(lon != 'x') %>%
+    mutate(lat = as.numeric(lat),
+           lon = as.numeric(lon))) %>% 
+  # fix cape woolamai manually, since it's recurrent and wrong in the db
+  mutate(lat = if_else(str_detect(spot_name, "Woolamai"), -38.54592263466488, lat), 
+         lon = if_else(str_detect(spot_name, "Woolamai"), 145.339864035216, lon))
+```
+
+
+```{r}
+fullgeo <- read_csv("data/surfspots_fullgeo.csv")
+fullgeo
+```
+
+```{r}
+# Apply to your dataframe
+spots <- fullgeo %>% 
+  # filter(str_detect(spot_name, "Manu") | str_detect(spot_name, "Bells") | str_detect(spot_name, "Barcel") |
+  #          str_detect(spot_name, "Zara") | str_detect(spot_name, "Wool") | str_detect(spot_name, "Snapper") |
+  #          str_detect(spot_name, "Cloud") ) %>%
+  mutate(country_name = countrycode(country_code, origin = 'iso2c', destination = 'country.name')) %>% 
+  select(lat, lon, spot_name, 
+         # name, 
+         # village, municipality, 
+         # country, country_code,
+         country = country_name) %>%
+  mutate(spot_name = janitor::make_clean_names(spot_name, case = 'title', allow_dupes = TRUE, use_make_names = FALSE)) %>%
+  arrange(spot_name) %>%
+  distinct(spot_name, country, .keep_all = T)
+  # mutate(spot_name = janitor::make_clean_names(spot_name, case = 'title'))
+
+# spots$country_name <- countrycode(spots$country_code, origin = 'iso2c', destination = 'country.name')
+
+spots
+```
+
+
+# Claude Help
+
+```{r}
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+```
+
+```{r}
+oceans <- ne_download(scale = 10, type = 'geography_marine_polys', 
+                        category = 'physical', returnclass = 'sf')
+```
+
+
+```{r}
+oceans <- st_make_valid(oceans)
+st_crs(oceans) <- 4326
+oceans <- oceans %>% 
+  select(featurecla, name, geometry) %>% 
+  mutate(name = janitor::make_clean_names(name, case = 'title', allow_dupes = TRUE, use_make_names = FALSE)) %>% 
+  arrange(name)
+
+oceans
+```
+
+```{r}
+get_parent_water_body <- function(region_name) {
+  # Mediterranean Sea
+  mediterranean_regions <- c("Balearic", "Iberian Sea", "Tyrrhenian", "Adriatic", 
+                            "Ionian", "Crete", "Ligurian", "Alboran", "Aegean")
+  
+  # Atlantic Ocean
+  atlantic_regions <- c("North Atlantic", "South Atlantic", "Norwegian", "North Sea", 
+                       "Baltic", "Bay of Biscay", "Guinea", "Labrador", "Irminger", 
+                       "Celtic", "English Channel")
+  
+  # Pacific Ocean
+  pacific_regions <- c("North Pacific", "South Pacific", "Japan", "East China", 
+                      "South China", "Philippine Sea", "Coral Sea", "Okhotsk", 
+                      "Bering", "California")
+  
+  # Indian Ocean
+  indian_regions <- c("Indian Ocean", "Arabian Sea", "Bay of Bengal", "Andaman", 
+                     "Laccadive", "Timor", "Arafura", "Mozambique Channel")
+  
+  # Check which group the region belongs to
+  if (any(sapply(mediterranean_regions, function(x) grepl(x, region_name, ignore.case = TRUE)))) {
+    return("Mediterranean Sea")
+  } else if (any(sapply(atlantic_regions, function(x) grepl(x, region_name, ignore.case = TRUE)))) {
+    return("Atlantic Ocean")
+  } else if (any(sapply(pacific_regions, function(x) grepl(x, region_name, ignore.case = TRUE)))) {
+    return("Pacific Ocean")
+  } else if (any(sapply(indian_regions, function(x) grepl(x, region_name, ignore.case = TRUE)))) {
+    return("Indian Ocean")
+  } else if (grepl("Caribbean", region_name, ignore.case = TRUE)) {
+    return("Caribbean Sea")
+  } else if (grepl("Tasman", region_name, ignore.case = TRUE)) {
+    return("Tasman Sea")
+  } else if (grepl("Bass", region_name, ignore.case = TRUE)) {
+    return("Bass Strait")
+  } else if (grepl("Red Sea", region_name, ignore.case = TRUE)) {
+    return("Red Sea")
+  } else if (grepl("Persian|Arabian Gulf", region_name, ignore.case = TRUE)) {
+    return("Persian Gulf")
+  } else if (grepl("Gulf of Mexico", region_name, ignore.case = TRUE)) {
+    return("Gulf of Mexico")
+  } else {
+    return(region_name)  # Return original name if no match
+  }
+}
+```
+
+```{r}
+oceans$parent_water <- sapply(oceans$name, get_parent_water_body)
+# oceans <- oceans %>% 
+#   filter(featurecla != "channel")
+oceans
+```
+
+
+```{r}
+target_names <- c("Atlantic Ocean", "Pacific Ocean", "Indian Ocean", 
+                  "Mediterranean Sea", "Caribbean Sea", "Tasman Sea", "Red Sea",
+                  "Bass Strait")
+water_bodies <- oceans[grepl(paste(c("Ocean", "Tasman", "Bass", "Medi", "Caribb"), 
+                                      collapse = "|"), 
+                                oceans$name, ignore.case = TRUE), ]
+water_bodies
+```
+
+```{r}
+spots
+```
+
+```{r}
+n <- 7
+input_point <- st_point(c(spots$lon[n], spots$lat[n]))
+input_point <- st_sfc(input_point, crs = 4326)
+
+results <- data.frame()
+
+sf_use_s2(FALSE)
+for (i in 1:nrow(oceans)) {
+    wb <- oceans[i, ]
+    
+    tryCatch({
+      # Make sure geometry is valid
+      region_geom <- st_make_valid(wb)
+      
+      # Calculate distance in meters, convert to km
+      dist <- as.numeric(st_distance(input_point, region_geom)) / 1000
+      
+      results <- rbind(results, data.frame(
+        body_of_water = wb$parent_water,
+        distance_km = round(dist, 2),
+        stringsAsFactors = FALSE
+      ))
+    }, error = function(e) {
+      warning(paste("Error processing", wb$parent_water, ":", e$message))
+    })
+  }
+  
+  # Aggregate by name (in case multiple polygons per water body)
+  results <- aggregate(distance_km ~ body_of_water, data = results, FUN = min)
+  results <- results[order(results$distance_km), ]
+  
+  list(
+    closest = results$body_of_water[1],
+    distance_km = results$distance_km[1],
+    all_distances = results
+  )
+```
+
+```{r}
+results
+```
+
+
+# test
+
+```{r}
+# Wrapper function to work with data frames
+find_closest_water_df <- function(df, lat_col = "lat", lon_col = "lon") {
+  # Load marine regions once (outside the loop for efficiency)
+  sf_use_s2(FALSE)
+  
+  # Apply to each row
+  results <- pblapply(1:nrow(df), function(i) {
+    lat <- df[[lat_col]][i]
+    lon <- df[[lon_col]][i]
+    
+    input_point <- st_point(c(lon, lat))
+    input_point <- st_sfc(input_point, crs = 4326)
+    
+    distances <- sapply(1:nrow(oceans), function(j) {
+      tryCatch({
+        region_geom <- st_make_valid(oceans[j, ])
+        as.numeric(st_distance(input_point, region_geom)) / 1000
+      }, error = function(e) {
+        return(NA)
+      })
+    })
+    
+    min_idx <- which.min(distances)
+    
+    list(
+      closest_water = oceans$name[min_idx],
+      closest_region = oceans$parent_water[min_idx],
+      distance_km = round(distances[min_idx], 2)
+    )
+  })
+  
+  # Convert results to data frame columns
+  df$closest_water <- sapply(results, function(x) x$closest_water)
+  df$closest_region <- sapply(results, function(x) x$closest_region)
+  df$distance_km <- sapply(results, function(x) x$distance_km)
+  
+  return(df)
+}
+```
+
+
+# process all
+
+```{r}
+ssea <- find_closest_water_df(spots, lat_col = "lat", lon_col = "lon")
+```
+
+
+```{r}
+ssea <- ssea %>% relocate(c(closest_water, closest_region, distance_km), .after = 3)
+ssea
+```
+
+
+```{r}
+# save ssea
+write_csv(ssea, "data/surfspots_with_ocean_country.csv")
+```
+
