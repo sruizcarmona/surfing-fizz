@@ -1,0 +1,4 @@
+^renv$
+^renv\.lock$
+^surfingfizz\.Rproj$
+^\.Rproj\.user$
